@@ -2,11 +2,15 @@
 #
 # setup.sh — Sobe o cluster Hadoop + Spark (bde2020) no Codespaces, sempre do
 # jeito certo:
-#   1. Corrige problemas de rede do próprio ambiente Docker-in-Docker
-#      (ip_forward desligado, ou política DROP na chain FORWARD do iptables
-#      -- comum quando coexistem regras "iptables-nft" e "iptables-legacy",
-#      um problema conhecido em Codespaces/Docker-in-Docker que impede os
+#   1. Corrige a política da chain FORWARD do iptables quando estiver em DROP
+#      (comum em ambientes Docker-in-Docker como o Codespaces, e que impede
 #      containers de se conectarem entre si mesmo estando na mesma rede).
+#      A correção é mínima por design: ajusta só a política, sem trocar o
+#      backend padrão do iptables do sistema nem reiniciar o Docker -- versões
+#      recentes do Docker gerenciam cadeias próprias (DOCKER-FORWARD) que
+#      dependem especificamente do backend nft, e uma correção mais agressiva
+#      (trocar para legacy + reiniciar o Docker) pode quebrar essa gestão
+#      interna em alguns ambientes.
 #   2. Cria a rede compartilhada ANTES do docker-compose up, evitando o erro
 #      "UnknownHostException: namenode" entre os dois projetos separados.
 #
@@ -22,7 +26,7 @@
 set -uo pipefail
 
 REDE="hadoop_spark_net"
-CSV="nyc_taxi_trip_2024_p1_sample.csv"
+CSV="nyc_tripdata_2024_sample_200k.csv"
 SCRIPT_SPARK="payment_type.py"
 
 # ------------------------------------------------------------------------
@@ -37,13 +41,22 @@ else
   echo "    net.ipv4.ip_forward já está ligado."
 fi
 
-PRECISA_REINICIAR_DOCKER=false
+PRECISA_AVISAR_RESET_MANUAL=false
 
 # Confere a política da chain FORWARD nos dois conjuntos de regras possíveis
 # (iptables "moderno"/nft e iptables-legacy). Em ambientes Docker-in-Docker
 # como o Codespaces, os dois podem coexistir -- e o kernel pode aplicar um
 # conjunto diferente do que `iptables` (sem sufixo) está mostrando, fazendo
 # com que uma política DROP passe despercebida numa checagem simples.
+#
+# IMPORTANTE: corrigimos a política (-P FORWARD ACCEPT) diretamente em cada
+# conjunto, SEM trocar qual conjunto é o "padrão do sistema"
+# (update-alternatives) e SEM reiniciar o Docker. Versões recentes do Docker
+# gerenciam cadeias próprias (ex: DOCKER-FORWARD) esperando especificamente o
+# backend nft -- forçar o sistema inteiro para o legacy quebra essa gestão
+# interna do próprio Docker em alguns ambientes (erro visto: "No chain/target
+# /match by that name" ao tentar recriar DOCKER-FORWARD). Ajustar só a
+# política, sem trocar o binário padrão, é a correção mínima e segura.
 for BIN in iptables iptables-legacy; do
   if command -v "$BIN" > /dev/null 2>&1; then
     POLICY=$(sudo "$BIN" -L FORWARD -n 2>/dev/null | head -1 | sed -n 's/.*(policy \([A-Za-z]*\).*/\1/p')
@@ -51,32 +64,20 @@ for BIN in iptables iptables-legacy; do
       echo "    $BIN: chain FORWARD com política $POLICY -- isso bloqueia tráfego"
       echo "    entre containers em redes diferentes. Corrigindo para ACCEPT..."
       sudo "$BIN" -P FORWARD ACCEPT
-      PRECISA_REINICIAR_DOCKER=true
+      PRECISA_AVISAR_RESET_MANUAL=true
     elif [ -n "$POLICY" ]; then
       echo "    $BIN: chain FORWARD já está com política $POLICY, ok."
     fi
   fi
 done
 
-if [ "$PRECISA_REINICIAR_DOCKER" = true ]; then
-  echo "    Forçando o uso consistente do conjunto de regras legacy"
-  echo "    (mais compatível com o Docker-in-Docker do Codespaces)..."
-  sudo update-alternatives --set iptables /usr/sbin/iptables-legacy > /dev/null 2>&1 || true
-  sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy > /dev/null 2>&1 || true
-  echo "    Reiniciando o daemon do Docker para regerar as regras..."
-  sudo service docker restart
-  echo "    Aguardando o daemon do Docker voltar..."
-  TENTATIVAS=0
-  until docker info > /dev/null 2>&1; do
-    TENTATIVAS=$((TENTATIVAS + 1))
-    if [ "$TENTATIVAS" -ge 20 ]; then
-      echo "ERRO: o Docker não respondeu depois do restart (esperei ~40s)."
-      echo "Rode './setup.sh' de novo -- se persistir, tente 'sudo service docker restart' manualmente."
-      exit 1
-    fi
-    sleep 2
-  done
-  echo "    Docker de volta."
+if [ "$PRECISA_AVISAR_RESET_MANUAL" = true ]; then
+  echo "    Política(s) corrigida(s). Isso normalmente já é suficiente -- o"
+  echo "    script NÃO reinicia o Docker nem troca o backend padrão de"
+  echo "    iptables, pois isso pode quebrar a gestão interna de rede de"
+  echo "    versões recentes do Docker. Se, mesmo assim, os containers não"
+  echo "    se conectarem entre si mais adiante, rode 'sudo service docker"
+  echo "    restart' manualmente e tente de novo."
 fi
 
 # ------------------------------------------------------------------------
