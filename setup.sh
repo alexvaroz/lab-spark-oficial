@@ -65,7 +65,18 @@ if [ "$PRECISA_REINICIAR_DOCKER" = true ]; then
   sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy > /dev/null 2>&1 || true
   echo "    Reiniciando o daemon do Docker para regerar as regras..."
   sudo service docker restart
-  sleep 5
+  echo "    Aguardando o daemon do Docker voltar..."
+  TENTATIVAS=0
+  until docker info > /dev/null 2>&1; do
+    TENTATIVAS=$((TENTATIVAS + 1))
+    if [ "$TENTATIVAS" -ge 20 ]; then
+      echo "ERRO: o Docker não respondeu depois do restart (esperei ~40s)."
+      echo "Rode './setup.sh' de novo -- se persistir, tente 'sudo service docker restart' manualmente."
+      exit 1
+    fi
+    sleep 2
+  done
+  echo "    Docker de volta."
 fi
 
 # ------------------------------------------------------------------------
@@ -86,8 +97,26 @@ echo "==> 3/6 Criando a rede compartilhada '$REDE' (se ainda não existir)..."
 if docker network inspect "$REDE" > /dev/null 2>&1; then
   echo "    Rede '$REDE' já existe, seguindo."
 else
-  docker network create "$REDE"
+  TENTATIVAS=0
+  until docker network create "$REDE" > /dev/null 2>&1; do
+    TENTATIVAS=$((TENTATIVAS + 1))
+    if [ "$TENTATIVAS" -ge 5 ]; then
+      echo "ERRO: não consegui criar a rede '$REDE' depois de $TENTATIVAS tentativas."
+      echo "Rode 'docker network create $REDE' manualmente para ver a mensagem de erro exata."
+      exit 1
+    fi
+    echo "    Falha ao criar a rede (tentativa $TENTATIVAS/5) -- tentando de novo em 2s..."
+    sleep 2
+  done
   echo "    Rede '$REDE' criada."
+fi
+
+# Confirma de verdade que a rede existe antes de seguir -- não custa nada e
+# evita prosseguir com uma suposição incorreta.
+if ! docker network inspect "$REDE" > /dev/null 2>&1; then
+  echo "ERRO: a rede '$REDE' deveria existir agora, mas 'docker network inspect' não a encontrou."
+  echo "Rode 'docker network ls' para investigar antes de continuar."
+  exit 1
 fi
 
 # ------------------------------------------------------------------------
@@ -137,7 +166,18 @@ fi
 # ------------------------------------------------------------------------
 echo "==> 5/6 Subindo os clusters..."
 ( cd docker-hadoop && docker-compose up -d )
-( cd docker-spark  && docker-compose up -d )
+if [ $? -ne 0 ]; then
+  echo "ERRO: falha ao subir o docker-hadoop (veja a mensagem acima)."
+  echo "Confira 'docker network ls' -- a rede '$REDE' precisa existir antes deste passo."
+  exit 1
+fi
+
+( cd docker-spark && docker-compose up -d )
+if [ $? -ne 0 ]; then
+  echo "ERRO: falha ao subir o docker-spark (veja a mensagem acima)."
+  echo "Confira 'docker network ls' -- a rede '$REDE' precisa existir antes deste passo."
+  exit 1
+fi
 
 echo "    Aguardando o namenode responder..."
 TENTATIVAS=0
