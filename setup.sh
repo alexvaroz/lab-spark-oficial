@@ -2,17 +2,6 @@
 #
 # setup.sh — Sobe o cluster Hadoop + Spark (bde2020) no Codespaces, sempre do
 # jeito certo:
-#   1. Corrige a política da chain FORWARD do iptables quando estiver em DROP
-#      (comum em ambientes Docker-in-Docker como o Codespaces, e que impede
-#      containers de se conectarem entre si mesmo estando na mesma rede).
-#      A correção é mínima por design: ajusta só a política, sem trocar o
-#      backend padrão do iptables do sistema nem reiniciar o Docker -- versões
-#      recentes do Docker gerenciam cadeias próprias (DOCKER-FORWARD) que
-#      dependem especificamente do backend nft, e uma correção mais agressiva
-#      (trocar para legacy + reiniciar o Docker) pode quebrar essa gestão
-#      interna em alguns ambientes.
-#   2. Cria a rede compartilhada ANTES do docker-compose up, evitando o erro
-#      "UnknownHostException: namenode" entre os dois projetos separados.
 #
 # Uso:
 #   chmod +x setup.sh
@@ -43,20 +32,6 @@ fi
 
 PRECISA_AVISAR_RESET_MANUAL=false
 
-# Confere a política da chain FORWARD nos dois conjuntos de regras possíveis
-# (iptables "moderno"/nft e iptables-legacy). Em ambientes Docker-in-Docker
-# como o Codespaces, os dois podem coexistir -- e o kernel pode aplicar um
-# conjunto diferente do que `iptables` (sem sufixo) está mostrando, fazendo
-# com que uma política DROP passe despercebida numa checagem simples.
-#
-# IMPORTANTE: corrigimos a política (-P FORWARD ACCEPT) diretamente em cada
-# conjunto, SEM trocar qual conjunto é o "padrão do sistema"
-# (update-alternatives) e SEM reiniciar o Docker. Versões recentes do Docker
-# gerenciam cadeias próprias (ex: DOCKER-FORWARD) esperando especificamente o
-# backend nft -- forçar o sistema inteiro para o legacy quebra essa gestão
-# interna do próprio Docker em alguns ambientes (erro visto: "No chain/target
-# /match by that name" ao tentar recriar DOCKER-FORWARD). Ajustar só a
-# política, sem trocar o binário padrão, é a correção mínima e segura.
 for BIN in iptables iptables-legacy; do
   if command -v "$BIN" > /dev/null 2>&1; then
     POLICY=$(sudo "$BIN" -L FORWARD -n 2>/dev/null | head -1 | sed -n 's/.*(policy \([A-Za-z]*\).*/\1/p')
@@ -162,6 +137,18 @@ services:
 EOF
 fi
 
+# Ajuste preventivo no HDFS: sem isso, leituras e escritas podem falhar com
+# "UnresolvedAddressException", porque os datanodes, nesse ambiente Docker,
+# às vezes se registram usando um hostname interno bruto que não é resolvível
+# pela rede. Aplicado ANTES do primeiro `docker-compose up` do docker-hadoop,
+# pra ninguém bater nesse erro durante o experimento em aula.
+if ! grep -q "dfs_client_use_datanode_hostname" docker-hadoop/hadoop.env 2>/dev/null; then
+  cat >> docker-hadoop/hadoop.env << 'EOF'
+HDFS_CONF_dfs_client_use_datanode_hostname=false
+HDFS_CONF_dfs_datanode_use_datanode_hostname=false
+EOF
+fi
+
 # ------------------------------------------------------------------------
 # 5/6 — Subir os clusters e validar
 # ------------------------------------------------------------------------
@@ -191,6 +178,33 @@ until docker exec namenode hdfs dfs -ls / > /dev/null 2>&1; do
   fi
   sleep 3
 done
+
+echo "    Verificando se há pelo menos um datanode vivo..."
+TENTATIVAS=0
+DATANODES_VIVOS=0
+until [ "$DATANODES_VIVOS" -ge 1 ]; do
+  DATANODES_VIVOS=$(docker exec namenode hdfs dfsadmin -report 2>/dev/null | sed -n 's/^Live datanodes (\([0-9]*\)).*/\1/p')
+  DATANODES_VIVOS=${DATANODES_VIVOS:-0}
+  if [ "$DATANODES_VIVOS" -ge 1 ]; then
+    break
+  fi
+  TENTATIVAS=$((TENTATIVAS + 1))
+  if [ "$TENTATIVAS" -ge 15 ]; then
+    echo "AVISO: nenhum datanode vivo depois de várias tentativas."
+    echo "Isso costuma acontecer quando o volume do namenode persistiu de uma"
+    echo "sessão anterior mas o do datanode foi perdido/recriado (metadado"
+    echo "aponta para blocos que não existem fisicamente mais -- erro típico:"
+    echo "'BlockMissingException ... No live nodes contain current block')."
+    echo "Se isso acontecer ao ler um arquivo do HDFS mais tarde, resolva com:"
+    echo "  cd docker-hadoop && docker-compose down -v && docker-compose up -d && cd .."
+    echo "e reenvie os dados pro HDFS depois."
+    break
+  fi
+  sleep 3
+done
+if [ "$DATANODES_VIVOS" -ge 1 ]; then
+  echo "    OK: $DATANODES_VIVOS datanode(s) vivo(s)."
+fi
 
 echo "    Verificando se Spark enxerga o Hadoop pela rede..."
 if docker exec spark-master getent hosts namenode > /dev/null 2>&1; then
