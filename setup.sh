@@ -2,6 +2,17 @@
 #
 # setup.sh — Sobe o cluster Hadoop + Spark (bde2020) no Codespaces, sempre do
 # jeito certo:
+#   1. Corrige a política da chain FORWARD do iptables quando estiver em DROP
+#      (comum em ambientes Docker-in-Docker como o Codespaces, e que impede
+#      containers de se conectarem entre si mesmo estando na mesma rede).
+#      A correção é mínima por design: ajusta só a política, sem trocar o
+#      backend padrão do iptables do sistema nem reiniciar o Docker -- versões
+#      recentes do Docker gerenciam cadeias próprias (DOCKER-FORWARD) que
+#      dependem especificamente do backend nft, e uma correção mais agressiva
+#      (trocar para legacy + reiniciar o Docker) pode quebrar essa gestão
+#      interna em alguns ambientes.
+#   2. Cria a rede compartilhada ANTES do docker-compose up, evitando o erro
+#      "UnknownHostException: namenode" entre os dois projetos separados.
 #
 # Uso:
 #   chmod +x setup.sh
@@ -15,7 +26,6 @@
 set -uo pipefail
 
 REDE="hadoop_spark_net"
-CSV="nyc_tripdata_2024_sample_200k.csv"
 SCRIPT_SPARK="payment_type.py"
 
 # ------------------------------------------------------------------------
@@ -32,6 +42,20 @@ fi
 
 PRECISA_AVISAR_RESET_MANUAL=false
 
+# Confere a política da chain FORWARD nos dois conjuntos de regras possíveis
+# (iptables "moderno"/nft e iptables-legacy). Em ambientes Docker-in-Docker
+# como o Codespaces, os dois podem coexistir -- e o kernel pode aplicar um
+# conjunto diferente do que `iptables` (sem sufixo) está mostrando, fazendo
+# com que uma política DROP passe despercebida numa checagem simples.
+#
+# IMPORTANTE: corrigimos a política (-P FORWARD ACCEPT) diretamente em cada
+# conjunto, SEM trocar qual conjunto é o "padrão do sistema"
+# (update-alternatives) e SEM reiniciar o Docker. Versões recentes do Docker
+# gerenciam cadeias próprias (ex: DOCKER-FORWARD) esperando especificamente o
+# backend nft -- forçar o sistema inteiro para o legacy quebra essa gestão
+# interna do próprio Docker em alguns ambientes (erro visto: "No chain/target
+# /match by that name" ao tentar recriar DOCKER-FORWARD). Ajustar só a
+# política, sem trocar o binário padrão, é a correção mínima e segura.
 for BIN in iptables iptables-legacy; do
   if command -v "$BIN" > /dev/null 2>&1; then
     POLICY=$(sudo "$BIN" -L FORWARD -n 2>/dev/null | head -1 | sed -n 's/.*(policy \([A-Za-z]*\).*/\1/p')
@@ -234,24 +258,16 @@ if [ "$TENTATIVAS" -lt 15 ]; then
 fi
 
 # ------------------------------------------------------------------------
-# 6/6 — Passos opcionais: só rodam se os arquivos existirem no repositório
+# 6/6 — Passo opcional: só roda se o script existir no repositório
 # ------------------------------------------------------------------------
-echo "==> 6/6 Preparando dados e script de exemplo (se presentes)..."
-
-if [ -f "$CSV" ]; then
-  echo "    Enviando '$CSV' para o HDFS..."
-  docker cp "$CSV" namenode:/tmp/
-  docker exec namenode hdfs dfs -mkdir -p /dados
-  docker exec namenode hdfs dfs -put -f "/tmp/$CSV" /dados/
-  echo "    Arquivo disponível em hdfs://namenode:9000/dados/$CSV"
-else
-  echo "    Aviso: '$CSV' não encontrado no diretório atual -- pulei o upload pro HDFS."
-fi
+echo "==> 6/6 Preparando script de exemplo (se presente)..."
 
 if [ -f "$SCRIPT_SPARK" ]; then
   echo "    Copiando '$SCRIPT_SPARK' para o spark-master..."
   docker cp "$SCRIPT_SPARK" "spark-master:/$SCRIPT_SPARK"
-  echo "    Pronto. Para rodar:"
+  echo "    Pronto. Lembre-se de baixar e enviar a base de dados ao HDFS antes de rodar"
+  echo "    (veja a Parte 5 do guia de execução: wget + docker cp + hdfs dfs -put)."
+  echo "    Depois, para rodar:"
   echo "    docker exec -it spark-master /spark/bin/spark-submit --master spark://spark-master:7077 /$SCRIPT_SPARK"
 else
   echo "    Aviso: '$SCRIPT_SPARK' não encontrado no diretório atual -- pulei a cópia."
