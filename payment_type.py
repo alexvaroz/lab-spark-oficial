@@ -1,20 +1,26 @@
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 
 spark = SparkSession.builder \
     .appName("PaymentTypeAnalysis") \
     .master("spark://spark-master:7077") \
     .getOrCreate()
 
-df = spark.read.csv("hdfs://namenode:9000/dados/nyc_taxi_trip_2024_p1_sample.csv", 
+df = spark.read.csv("hdfs://namenode:9000/dados/nyc_taxi_trip_2024_p1_sample.csv",
                     header=True, inferSchema=True)
 
-# Questão 1 - Corridas por tipo de pagamento
-df.groupBy("payment_type").count().orderBy("count", ascending=False).show()
+# Questões 1, 2 e 3 - Corridas, receita total e tarifa média por tipo de pagamento
+resultado = df.groupBy("payment_type").agg(
+    F.count("*").alias("qtd_corridas"),
+    F.sum("total_amount").alias("receita_total"),
+    F.avg("fare_amount").alias("tarifa_media"),
+).orderBy("qtd_corridas", ascending=False)
 
-# Questão 2 - Receita total por tipo de pagamento
-df.groupBy("payment_type").sum("total_amount").show()
 
-# Questão 3 - Tarifa média por tipo de pagamento
-df.groupBy("payment_type").avg("fare_amount").show()
+# Salva o resultado no HDFS do cluster (1 arquivo CSV, sobrescrevendo execuções anteriores)
+resultado.coalesce(1).write \
+    .mode("overwrite") \
+    .option("header", True) \
+    .csv("hdfs://namenode:9000/resultados/payment_type")
 
 spark.stop()
