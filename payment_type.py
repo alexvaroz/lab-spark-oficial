@@ -5,7 +5,8 @@ spark = SparkSession.builder \
     .master("spark://spark-master:7077") \
     .getOrCreate()
 
-df = spark.read.csv("hdfs://namenode:9000/dados/nyc_taxi_trip_2024_p1_sample.csv", header=True)
+df = spark.read.csv("hdfs://namenode:9000/dados/nyc_taxi_trip_2024_p1_sample.csv", 
+                    header=True, inferSchema=True)
 
 # Questão 1 - Corridas por tipo de pagamento
 df.groupBy("payment_type").count().orderBy("count", ascending=False).show()
