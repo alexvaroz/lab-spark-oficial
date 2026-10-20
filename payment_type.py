@@ -6,7 +6,7 @@ spark = SparkSession.builder \
     .master("spark://spark-master:7077") \
     .getOrCreate()
 
-df = spark.read.csv("hdfs://namenode:9000/dados/nyc_taxi_trip_2024_p1_sample.csv",
+df = spark.read.csv("hdfs://namenode:9000/dados/nyc_tripdata_2024_sample_1M.csv",
                     header=True, inferSchema=True)
 
 # Questões 1, 2 e 3 - Corridas, receita total e tarifa média por tipo de pagamento
